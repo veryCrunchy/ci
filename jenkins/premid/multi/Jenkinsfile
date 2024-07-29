@@ -1,0 +1,209 @@
+pipeline {
+    agent any
+
+    environment {
+        WEB_SUFFIX = "pmd.crun.zip"
+        NGINX_PATH = "/etc/nginx/sites-available/jenkins/premid"
+        DOCKER_REGISTRY = 'ghcr.io/verycrunchy'  // Replace with your Docker registry
+        GITHUB_TOKEN = credentials('github-packages-token')  // Jenkins GitHub token credential
+        PORT_RANGE_START = 25000  // Starting range for available ports
+        PORT_RANGE_END = 25100  // Ending range for available ports
+    }
+
+    options {
+        skipDefaultCheckout()
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                script {
+                    checkout scm
+                }
+            }
+        }
+
+        stage('Detect Changes') {
+            steps {
+                script {
+                    def changes = sh(script: 'git diff --name-only origin/main', returnStdout: true).trim()
+                    def changedApps = []
+
+                    changes.split('\n').each { file ->
+                        def app = file.split('/')[1]
+                        if (app == 'website' || app == 'docs') {
+                            if (!changedApps.contains(app)) {
+                                changedApps.add(app)
+                            }
+                        }
+                    }
+
+                    if (changedApps.size() == 0) {
+                        echo "No relevant changes detected. Stopping the pipeline."
+                        currentBuild.result = 'SUCCESS'
+                        return
+                    }
+
+                    echo "Changed apps: ${changedApps}"
+                    env.CHANGED_APPS = changedApps.join(',')
+                }
+            }
+        }
+
+        stage('Build and Push Docker Images') {
+            parallel {
+                stage('Build and Push Website') {
+                    when {
+                        expression { env.CHANGED_APPS.contains('website') }
+                    }
+                    steps {
+                        script {
+                            def imageName = "${DOCKER_REGISTRY}/website:${env.CHANGE_ID}"
+                            def dockerfile = """
+                            FROM node:22
+
+                            ENV NODE_ENV=production
+                            ENV PORT=3000
+                            
+                            WORKDIR /app
+
+                            COPY apps/website/package*.json ./
+                            RUN pnpm install
+
+                            COPY apps/website ./
+
+                            RUN pnpm run build
+
+                            EXPOSE 3000
+
+                            CMD ["node", "./.output/server/index.mjs"]
+                            """
+
+                            sh """
+                            echo '${dockerfile}' > Dockerfile &&
+                            docker build -t ${imageName} . &&
+                            docker push ${imageName}
+                            """
+                            env.WEBSITE_IMAGE = imageName
+                        }
+                    }
+                }
+                stage('Build Static Docs') {
+                    when {
+                        expression { env.CHANGED_APPS.contains('docs') }
+                    }
+                    steps {
+                        script {
+                            dir('apps/docs') {
+                                sh 'pnpm install'
+                                sh 'pnpm run build'
+                                sh "cp -r .vitepress/dist/* /var/www/jenkins/premid/docs/${env.CHANGE_ID}"
+                                configureNginxDocs("${env.CHANGE_ID}.docs.${env.WEB_SUFFIX}", env.CHANGE_ID)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Deploy to Server') {
+            parallel {
+                stage('Deploy Website') {
+                    when {
+                        expression { env.CHANGED_APPS.contains('website') }
+                    }
+                    steps {
+                        script {
+                            def freePort = findFreePort()
+                            deployNuxtApp(env.WEBSITE_IMAGE, "website-${env.CHANGE_ID}", freePort)
+                            configureNginxWeb("${env.CHANGE_ID}.${WEB_SUFFIX}", freePort)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            echo "Cleaning up..."
+        }
+        success {
+            echo "Pipeline succeeded."
+        }
+        failure {
+            echo "Pipeline failed."
+        }
+    }
+}
+
+def findFreePort() {
+    return sh(script: """
+        while true; do
+            PORT=$(shuf -i ${env.PORT_RANGE_START}-${env.PORT_RANGE_END} -n 1)
+            ss -lpn | grep -q ":${PORT} " || break
+        done
+        echo $PORT
+    """, returnStdout: true).trim()
+}
+
+def deployNuxtApp(String imageName, String containerName, String port) {
+    sh """
+    docker pull ${imageName} &&
+    docker stop ${containerName} || true &&
+    docker rm ${containerName} || true &&
+    docker run -d --name ${containerName} -p 127.0.0.1:${port}:3000 ${imageName}
+    """
+}
+
+def configureNginxWeb(String serverName, int port) {
+    sh """
+    echo "server {
+        listen ${env.IP}:443;
+        server_name ${serverName};
+
+        location / {
+            proxy_pass http://127.0.0.1:${port};
+            proxy_set_header Host \$host;
+            proxy_set_header X-Real-IP \$remote_addr;
+            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto \$scheme;
+        }
+    }" | sudo tee ${env.NGINX_PATH}/${serverName}.conf &&
+    sudo nginx -s reload
+    """
+}
+
+def configureNginxDocs(String serverName, String CHANGE_ID) {
+    sh """
+    echo "server {
+        listen ${env.IP}:443;
+        server_name ${serverName};
+
+        gzip on;
+        gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
+        root /var/www/jenkins/premid/docs/${CHANGE_ID};
+        index index.html;
+
+        location / {
+            try_files $uri $uri.html $uri/ =404;
+
+            error_page 404 /404.html;
+
+            error_page 403 /404.html;
+
+            location ~* ^/assets/ {
+                expires 1y;
+                add_header Cache-Control "public, immutable";
+            }
+        }
+
+        ssl_certificate /etc/letsencrypt/live/pmd.crun.zip/fullchain.pem;
+        ssl_certificate_key /etc/letsencrypt/live/pmd.crun.zip/privkey.pem;
+        include /etc/letsencrypt/options-ssl-nginx.conf;
+        ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+    }" | sudo tee ${env.NGINX_PATH}/${serverName}.conf &&
+    sudo nginx -s reload
+    """
+}
+ 
