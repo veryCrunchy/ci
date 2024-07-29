@@ -1,6 +1,3 @@
-pipeline {
-    agent any
-
     environment {
         WEB_SUFFIX = "pmd.crun.zip"
         NGINX_PATH = "/etc/nginx/sites-available/jenkins/premid"
@@ -205,5 +202,3 @@ def configureNginxDocs(String serverName, String CHANGE_ID) {
     }" | sudo tee ${env.NGINX_PATH}/${serverName}.conf &&
     sudo nginx -s reload
     """
-}
- 
