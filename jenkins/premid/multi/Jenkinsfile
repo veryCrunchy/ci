@@ -7,10 +7,6 @@
         PORT_RANGE_END = 25100  // Ending range for available ports
     }
 
-    options {
-        skipDefaultCheckout()
-    }
-
     stages {
         stage('Checkout') {
             steps {
