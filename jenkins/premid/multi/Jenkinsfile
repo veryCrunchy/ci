@@ -140,7 +140,7 @@ pipeline {
 def findFreePort() {
     return sh(script: """
         while true; do
-            PORT=$(shuf -i ${env.PORT_RANGE_START}-${env.PORT_RANGE_END} -n 1)
+            PORT=\$(shuf -i ${env.PORT_RANGE_START}-${env.PORT_RANGE_END} -n 1)
             ss -lpn | grep -q ":${PORT} " || break
         done
         echo $PORT
