@@ -132,7 +132,6 @@
             echo "Pipeline failed."
         }
     }
-}
 
 def findFreePort() {
     return sh(script: """
@@ -202,3 +201,4 @@ def configureNginxDocs(String serverName, String CHANGE_ID) {
     }" | sudo tee ${env.NGINX_PATH}/${serverName}.conf &&
     sudo nginx -s reload
     """
+}

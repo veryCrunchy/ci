@@ -1,0 +1,16 @@
+pipeline {
+    agent any
+
+    stages {
+        stage('Load and Execute External Jenkinsfile') {
+            steps {
+                script {
+                    def url = 'https://raw.githubusercontent.com/veryCrunchy/ci/main/jenkins/premid/multi/Jenkinsfile'
+                    def externalJenkinsfile = sh(script: "curl -s ${url}", returnStdout: true).trim()
+                    
+                    evaluate externalJenkinsfile
+                }
+            }
+        }
+    }
+}
